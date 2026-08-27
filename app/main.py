@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import re
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date
+from tempfile import SpooledTemporaryFile
 from pathlib import Path
 from typing import Any, Iterator
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -24,14 +31,14 @@ from app.models import (
     Conversation,
     FieldSource,
     FormField,
-    ProcessingStatus,
     Segment,
     record_event,
     utcnow,
 )
-from app.pipeline import is_processing, submit
+from app.pipeline import is_processing, receive_transcription, restart, resume, submit
 from app.schemas import (
     AuditEventOut,
+    CompleteUpload,
     ConversationDetail,
     ConversationSummary,
     EvidenceOut,
@@ -41,7 +48,9 @@ from app.schemas import (
     SectionSpecOut,
     SegmentOut,
     TemplateOut,
+    UploadTicketOut,
 )
+from app.storage import LocalStorage, StorageError, get_storage, guess_content_type
 from app.templates import ConversationTemplate, get_template, list_templates
 from app.util import normalise
 
@@ -56,8 +65,13 @@ ALLOWED_AUDIO_SUFFIXES = {
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    settings.ensure_dirs()
-    init_db()
+    if settings.storage_backend.lower() == "local":
+        settings.ensure_dirs()
+    if settings.auto_create_tables:
+        # Convenient locally. On a serverless host set AUTO_CREATE_TABLES=false
+        # and run scripts/migrate.py once, rather than paying for this on
+        # every cold start.
+        init_db()
     yield
 
 
@@ -220,18 +234,166 @@ def api_templates() -> list[TemplateOut]:
 @app.get("/api/config")
 def api_config() -> dict[str, Any]:
     """What this deployment is wired up to. Shown in the UI footer."""
+    storage = get_storage(settings)
+    speech_model = {
+        "fixture": "sidecar",
+        "assemblyai": "universal",
+    }.get(settings.speech_provider.lower(), settings.whisper_model)
     return {
         "speech_provider": settings.speech_provider,
-        "speech_model": settings.whisper_model if settings.speech_provider != "fixture" else "sidecar",
+        "speech_model": speech_model,
         "analysis_provider": "claude" if settings.claude_available() else "heuristic",
         "analysis_model": settings.claude_model if settings.claude_available() else "extractive",
         "max_upload_mb": settings.max_upload_mb,
+        "storage_backend": storage.name,
+        # Tells the browser whether to upload straight to storage or post the
+        # file here.
+        "direct_upload": storage.supports_direct_upload,
+        "job_runner": settings.job_runner,
     }
 
 
 # --------------------------------------------------------------------------
 # Conversations
 # --------------------------------------------------------------------------
+
+def _new_conversation(
+    *,
+    title: str,
+    template,
+    manager_name: str,
+    report_name: str,
+    occurred_on: str,
+    audio_filename: str,
+    audio_mime: str,
+) -> Conversation:
+    return Conversation(
+        title=normalise(title) or f"Conversation with {normalise(report_name) or 'team member'}",
+        template_id=template.id,
+        manager_name=normalise(manager_name),
+        report_name=normalise(report_name),
+        occurred_on=normalise(occurred_on) or date.today().isoformat(),
+        consent_confirmed=True,
+        audio_filename=audio_filename,
+        audio_mime=audio_mime,
+    )
+
+
+def _check_consent(confirmed: bool) -> None:
+    if not confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Confirm that both people knew the conversation was being recorded "
+                "before uploading it."
+            ),
+        )
+
+
+def _check_suffix(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix not in ALLOWED_AUDIO_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported audio type {suffix or '(none)'}. Accepted: "
+            + ", ".join(sorted(ALLOWED_AUDIO_SUFFIXES)),
+        )
+    return suffix
+
+
+def _resolve_template(template_id: str):
+    try:
+        return get_template(template_id or None)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/uploads", response_model=UploadTicketOut)
+def api_upload_ticket(
+    filename: str = Form(...),
+    content_type: str = Form(""),
+) -> UploadTicketOut:
+    """Ask for somewhere to put a recording.
+
+    When storage can take the bytes directly, the browser uploads to the
+    returned URL and never sends the file through this application - which is
+    what makes a large recording possible on a host that caps request bodies at
+    a few megabytes.
+    """
+    suffix = _check_suffix(Path(filename).name)
+    storage = get_storage(settings)
+    key = f"audio/{uuid.uuid4().hex}{suffix}"
+    mime = content_type or guess_content_type(filename)
+    try:
+        ticket = storage.upload_ticket(key, mime)
+    except StorageError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return UploadTicketOut(
+        key=ticket.key,
+        upload_url=ticket.upload_url,
+        method=ticket.method,
+        headers=ticket.headers or {},
+        expires_in=ticket.expires_in,
+        direct=ticket.direct,
+    )
+
+
+@app.post("/api/conversations/complete", response_model=ConversationDetail, status_code=201)
+def api_complete_upload(
+    body: CompleteUpload, session: Session = Depends(get_session)
+) -> ConversationDetail:
+    """Register a recording the browser has already put into storage."""
+    _check_consent(body.consent_confirmed)
+    _check_suffix(Path(body.audio_filename).name)
+    template = _resolve_template(body.template_id)
+
+    storage = get_storage(settings)
+    if not body.key.startswith("audio/"):
+        raise HTTPException(status_code=400, detail="Unrecognised storage key.")
+    try:
+        if not storage.exists(body.key):
+            raise HTTPException(
+                status_code=409,
+                detail="That recording is not in storage. The upload may not have finished.",
+            )
+        size = storage.size(body.key)
+    except StorageError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if size > settings.max_upload_bytes:
+        storage.delete(body.key)
+        raise HTTPException(
+            status_code=413, detail=f"Recording is larger than the {settings.max_upload_mb} MB limit."
+        )
+
+    conversation = _new_conversation(
+        title=body.title,
+        template=template,
+        manager_name=body.manager_name,
+        report_name=body.report_name,
+        occurred_on=body.occurred_on,
+        audio_filename=Path(body.audio_filename).name,
+        audio_mime=body.audio_mime or guess_content_type(body.audio_filename),
+    )
+    conversation.audio_key = body.key
+    conversation.audio_bytes = size
+    local = storage.local_path(body.key)
+    conversation.audio_path = str(local) if local else ""
+
+    session.add(conversation)
+    session.flush()
+    record_event(
+        session, conversation.id, "uploaded",
+        actor=conversation.manager_name or "manager",
+        filename=conversation.audio_filename, bytes=size,
+        template_id=template.id, storage=storage.name, direct=True,
+    )
+    session.commit()
+
+    submit(conversation.id, settings)
+    session.refresh(conversation)
+    return _detail(conversation, session)
+
 
 @app.post("/api/conversations", response_model=ConversationDetail, status_code=201)
 async def api_create_conversation(
@@ -244,77 +406,64 @@ async def api_create_conversation(
     consent_confirmed: bool = Form(False),
     session: Session = Depends(get_session),
 ) -> ConversationDetail:
-    if not consent_confirmed:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Confirm that both people knew the conversation was being recorded "
-                "before uploading it."
-            ),
-        )
+    """Upload a recording through the application.
 
-    try:
-        template = get_template(template_id or None)
-    except KeyError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+    Simple, and right for a self-hosted deployment. Serverless hosts cap the
+    request body well below the size of a real recording, so there the browser
+    uses /api/uploads and /api/conversations/complete instead.
+    """
+    _check_consent(consent_confirmed)
     filename = Path(audio.filename or "recording").name
-    suffix = Path(filename).suffix.lower()
-    if suffix not in ALLOWED_AUDIO_SUFFIXES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported audio type {suffix or '(none)'}. Accepted: "
-            + ", ".join(sorted(ALLOWED_AUDIO_SUFFIXES)),
-        )
+    suffix = _check_suffix(filename)
+    template = _resolve_template(template_id)
 
-    conversation = Conversation(
-        title=normalise(title) or f"Conversation with {normalise(report_name) or 'team member'}",
-        template_id=template.id,
-        manager_name=normalise(manager_name),
-        report_name=normalise(report_name),
-        occurred_on=normalise(occurred_on) or date.today().isoformat(),
-        consent_confirmed=True,
+    conversation = _new_conversation(
+        title=title,
+        template=template,
+        manager_name=manager_name,
+        report_name=report_name,
+        occurred_on=occurred_on,
         audio_filename=filename,
-        audio_mime=audio.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        audio_mime=audio.content_type or guess_content_type(filename),
     )
     session.add(conversation)
     session.flush()
 
-    destination = settings.audio_dir / f"{conversation.id}{suffix}"
+    storage = get_storage(settings)
+    key = f"audio/{conversation.id}{suffix}"
+    spooled = SpooledTemporaryFile(max_size=8 * 1024 * 1024)
     written = 0
     try:
-        with destination.open("wb") as handle:
-            while chunk := await audio.read(1024 * 1024):
-                written += len(chunk)
-                if written > settings.max_upload_bytes:
-                    handle.close()
-                    destination.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Recording is larger than the {settings.max_upload_mb} MB limit.",
-                    )
-                handle.write(chunk)
+        while chunk := await audio.read(1024 * 1024):
+            written += len(chunk)
+            if written > settings.max_upload_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Recording is larger than the {settings.max_upload_mb} MB limit.",
+                )
+            spooled.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="The uploaded file was empty.")
+        spooled.seek(0)
+        storage.put(key, spooled, conversation.audio_mime)
     except HTTPException:
         session.rollback()
         raise
+    except StorageError as exc:
+        session.rollback()
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
+        spooled.close()
         await audio.close()
 
-    if written == 0:
-        destination.unlink(missing_ok=True)
-        session.rollback()
-        raise HTTPException(status_code=400, detail="The uploaded file was empty.")
-
-    conversation.audio_path = str(destination)
+    conversation.audio_key = key
     conversation.audio_bytes = written
+    local = storage.local_path(key)
+    conversation.audio_path = str(local) if local else ""
     record_event(
-        session,
-        conversation.id,
-        "uploaded",
+        session, conversation.id, "uploaded",
         actor=conversation.manager_name or "manager",
-        filename=filename,
-        bytes=written,
-        template_id=template.id,
+        filename=filename, bytes=written, template_id=template.id, storage=storage.name,
     )
     session.commit()
 
@@ -339,14 +488,66 @@ def api_get_conversation(conversation_id: str, session: Session = Depends(get_se
 def api_status(conversation_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
     """Cheap poll target while the pipeline runs."""
     conversation = _get_conversation(conversation_id, session)
+    if not conversation.is_terminal and settings.is_serverless:
+        # Nothing runs between requests on a serverless host, so the browser's
+        # own polling doubles as the thing that keeps a stalled run moving.
+        # resume() is a no-op unless the stage has genuinely stopped.
+        try:
+            resume(conversation.id, settings)
+            session.refresh(conversation)
+        except Exception:  # noqa: BLE001 - never let a nudge break the poll
+            logger.exception("resume failed for %s", conversation.id)
     return {
         "id": conversation.id,
         "status": conversation.status.value,
         "status_detail": conversation.status_detail,
         "error": conversation.error,
         "processing": is_processing(conversation.id),
+        "stage_age_seconds": conversation.stage_age_seconds,
         "updated_at": conversation.updated_at.isoformat(),
     }
+
+
+@app.post("/api/conversations/{conversation_id}/resume")
+def api_resume(conversation_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Push a stalled conversation forward. Safe to call at any time."""
+    conversation = _get_conversation(conversation_id, session)
+    status = resume(conversation.id, settings)
+    return {"id": conversation.id, "status": status.value}
+
+
+@app.post("/api/webhooks/transcription")
+async def api_transcription_webhook(
+    request: Request,
+    x_conversation_records_secret: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Called by the transcription service when a job finishes.
+
+    On a serverless host this is the one invocation guaranteed to happen after
+    the upload returns, so it carries the conversation through alignment and
+    drafting rather than handing off again.
+    """
+    if settings.webhook_secret and x_conversation_records_secret != settings.webhook_secret:
+        raise HTTPException(status_code=401, detail="Bad webhook secret.")
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Webhook body was not JSON.") from exc
+
+    job_id = body.get("transcript_id") or body.get("id")
+    if not job_id:
+        raise HTTPException(status_code=400, detail="Webhook carried no transcript id.")
+
+    status = body.get("status")
+    if status and status not in ("completed", "error"):
+        return {"ok": True, "ignored": status}
+
+    conversation_id = receive_transcription(str(job_id), settings)
+    if conversation_id is None:
+        # Unknown job: acknowledge so the service stops retrying.
+        return {"ok": True, "matched": False}
+    return {"ok": True, "matched": True, "conversation_id": conversation_id}
 
 
 @app.post("/api/conversations/{conversation_id}/reprocess", response_model=ConversationDetail)
@@ -355,13 +556,13 @@ def api_reprocess(conversation_id: str, session: Session = Depends(get_session))
     conversation = _get_conversation(conversation_id, session)
     if is_processing(conversation.id):
         raise HTTPException(status_code=409, detail="This conversation is already being processed.")
-    if not Path(conversation.audio_path or "").exists():
-        raise HTTPException(status_code=410, detail="The audio for this conversation is no longer on disk.")
+    if conversation.transcript_json is None and not get_storage(settings).exists(conversation.audio_key):
+        raise HTTPException(
+            status_code=410, detail="The recording for this conversation is no longer in storage."
+        )
     record_event(session, conversation.id, "reprocess_requested", actor="manager")
-    conversation.status = ProcessingStatus.UPLOADED
-    conversation.status_detail = "Queued for reprocessing"
-    conversation.error = None
     session.commit()
+    restart(conversation.id, settings)
     submit(conversation.id, settings)
     session.refresh(conversation)
     return _detail(conversation, session)
@@ -370,13 +571,16 @@ def api_reprocess(conversation_id: str, session: Session = Depends(get_session))
 @app.delete("/api/conversations/{conversation_id}", status_code=204)
 def api_delete(conversation_id: str, session: Session = Depends(get_session)) -> Response:
     conversation = _get_conversation(conversation_id, session)
-    audio_path = Path(conversation.audio_path or "")
+    key = conversation.audio_key
     session.delete(conversation)
     session.commit()
-    # Only ever remove files this app put in its own audio directory.
-    audio_dir = settings.audio_dir.resolve()
-    if audio_path.exists() and audio_path.resolve().is_relative_to(audio_dir):
-        audio_path.unlink(missing_ok=True)
+    if key:
+        try:
+            get_storage(settings).delete(key)
+        except StorageError:
+            # The record is gone either way; a stranded object is not worth
+            # failing the request over.
+            logger.exception("Could not delete recording %s", key)
     return Response(status_code=204)
 
 
@@ -483,8 +687,19 @@ def api_audio(
 ) -> Response:
     """Serve the recording, honouring Range requests so the player can seek."""
     conversation = _get_conversation(conversation_id, session)
-    path = Path(conversation.audio_path or "")
-    if not path.exists():
+    storage = get_storage(settings)
+
+    # Remote storage serves the bytes itself, including Range requests, so hand
+    # the browser a short-lived URL rather than proxying a recording through a
+    # function that is billed by the second.
+    if not isinstance(storage, LocalStorage):
+        url = storage.playback_url(conversation.audio_key, expires_in=3600)
+        if not url:
+            raise HTTPException(status_code=404, detail="Audio file not found")
+        return RedirectResponse(url, status_code=307)
+
+    path = storage.local_path(conversation.audio_key) or Path(conversation.audio_path or "")
+    if not path.is_file():
         raise HTTPException(status_code=404, detail="Audio file not found")
 
     size = path.stat().st_size

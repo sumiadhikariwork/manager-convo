@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
     whisper_device: str = "auto"
     whisper_compute_type: str = "int8"
 
+    # Hosted transcription (speech_provider=assemblyai)
+    assemblyai_api_key: str = ""
+    assemblyai_language: str = ""
+    assemblyai_speakers_expected: int = 2
+
     # Understanding
     analysis_provider: str = "claude"
     anthropic_api_key: str = ""
@@ -26,6 +32,32 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str = "sqlite:///./data/manager_convo.sqlite3"
     max_upload_mb: int = 200
+
+    #: "local" (a directory on disk) or "s3" (any S3-compatible bucket).
+    storage_backend: str = "local"
+    storage_bucket: str = ""
+    storage_region: str = "auto"
+    storage_endpoint_url: str = ""
+    storage_access_key_id: str = ""
+    storage_secret_access_key: str = ""
+    #: Set when the bucket is served from a CDN or public domain; otherwise
+    #: playback uses a short-lived presigned URL.
+    storage_public_base_url: str = ""
+
+    # Execution
+    #: "thread" runs the pipeline in a background thread (a long-lived server).
+    #: "deferred" advances it one stage per request, driven by webhooks and the
+    #: resume endpoint - the only shape that survives a serverless host.
+    job_runner: str = "thread"
+    #: Public origin of this deployment, needed so transcription webhooks can
+    #: reach us. On Vercel, VERCEL_URL supplies it automatically.
+    public_base_url: str = ""
+    #: Shared secret in the webhook URL, so only the transcription service can
+    #: advance a conversation.
+    webhook_secret: str = ""
+    #: Create tables at startup. Convenient locally; on a serverless host run
+    #: scripts/migrate.py once instead of paying for this on every cold start.
+    auto_create_tables: bool = True
 
     @property
     def audio_dir(self) -> Path:
@@ -52,6 +84,21 @@ class Settings(BaseSettings):
                 "writable, persistent directory. On a read-only or ephemeral host, "
                 "point DATA_DIR at a mounted volume."
             ) from exc
+
+    @property
+    def base_url(self) -> str:
+        """Public origin of this deployment, without a trailing slash."""
+        if self.public_base_url:
+            return self.public_base_url.rstrip("/")
+        # Vercel exposes the deployment host but not the scheme.
+        vercel = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL")
+        if vercel:
+            return f"https://{vercel.rstrip('/')}"
+        return ""
+
+    @property
+    def is_serverless(self) -> bool:
+        return self.job_runner.lower() == "deferred"
 
     def claude_available(self) -> bool:
         """True when a Claude-backed analysis run is actually possible.

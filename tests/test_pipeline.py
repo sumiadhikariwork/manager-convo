@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import select
 
 from app.analysis.types import AnalysisError
+from app.config import get_settings
 from app.db import SessionLocal
 from app.models import AuditEvent, Conversation, FieldSource, FormField, ProcessingStatus, Segment
-from app.pipeline import process_conversation
+from app.pipeline import process_conversation, restart
 from app.templates import GROW_MONTHLY
 from app.util import normalise
 
 
-def _make_conversation(audio_path, template_id=GROW_MONTHLY.id) -> str:
+def _make_conversation(audio_key, template_id=GROW_MONTHLY.id) -> str:
+    from app.storage import get_storage
+
+    storage = get_storage(get_settings())
     with SessionLocal() as session:
         conversation = Conversation(
             title="Monthly check-in",
@@ -21,10 +27,11 @@ def _make_conversation(audio_path, template_id=GROW_MONTHLY.id) -> str:
             manager_name="Priya",
             report_name="Sam",
             consent_confirmed=True,
-            audio_filename=audio_path.name,
-            audio_path=str(audio_path),
+            audio_filename=Path(audio_key).name,
+            audio_key=audio_key,
+            audio_path=str(storage.local_path(audio_key) or ""),
             audio_mime="audio/wav",
-            audio_bytes=audio_path.stat().st_size,
+            audio_bytes=storage.size(audio_key) if storage.exists(audio_key) else 0,
         )
         session.add(conversation)
         session.commit()
@@ -112,9 +119,11 @@ def test_metrics_are_counted_from_the_aligned_transcript(settings, audio_with_si
 
 def test_a_missing_transcript_fails_the_record_rather_than_the_process(settings, silent_wav):
     """No sidecar and no model: the failure belongs on the record, visibly."""
-    target = settings.audio_dir / "lonely.wav"
+    key = "audio/lonely.wav"
+    target = settings.audio_dir / key
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(silent_wav.read_bytes())
-    conversation_id = _make_conversation(target)
+    conversation_id = _make_conversation(key)
 
     process_conversation(conversation_id, settings)
 
@@ -166,6 +175,7 @@ def test_reprocessing_keeps_what_the_manager_wrote(settings, audio_with_sidecar)
         field_id = field.id
         session.commit()
 
+    restart(conversation_id, settings)
     process_conversation(conversation_id, settings)
 
     with SessionLocal() as session:
@@ -191,6 +201,7 @@ def test_reprocessing_refreshes_untouched_fields(settings, audio_with_sidecar):
         field_id = field.id
         session.commit()
 
+    restart(conversation_id, settings)
     process_conversation(conversation_id, settings)
 
     with SessionLocal() as session:

@@ -8,3 +8,6 @@ __pycache__
 .pytest_cache
 .env
 node_modules
+api
+vercel.json
+.vercel

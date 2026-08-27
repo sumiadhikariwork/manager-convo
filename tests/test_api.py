@@ -9,7 +9,9 @@ from fastapi.testclient import TestClient
 
 from app import pipeline
 from app.config import get_settings
+from app.db import SessionLocal
 from app.main import app
+from app.models import Conversation
 from app.templates import GROW_MONTHLY
 
 
@@ -88,7 +90,9 @@ def test_templates_are_listed_with_their_fields(client):
 def test_config_reports_what_this_deployment_runs_on(client):
     body = client.get("/api/config").json()
     assert body["speech_provider"] == "fixture"
+    assert body["speech_model"] == "sidecar"
     assert body["analysis_provider"] == "heuristic"
+    assert body["job_runner"] == "thread"
 
 
 # -- upload ----------------------------------------------------------------
@@ -305,14 +309,16 @@ def test_reprocess_reruns_the_pipeline(client, script):
 
 
 def test_delete_removes_the_record_and_the_recording(client, script):
-    settings = get_settings()
+    from app.storage import get_storage
+
+    storage = get_storage(get_settings())
     detail = _upload(client, script).json()
-    audio_files = list(settings.audio_dir.glob(f"{detail['id']}.*"))
-    assert audio_files
+    key = f"audio/{detail['id']}.wav"
+    assert storage.exists(key)
 
     assert client.delete(f"/api/conversations/{detail['id']}").status_code == 204
     assert client.get(f"/api/conversations/{detail['id']}").status_code == 404
-    assert not (settings.audio_dir / f"{detail['id']}.wav").exists()
+    assert not storage.exists(key)
 
 
 def test_unknown_conversation_is_a_404(client):
@@ -327,3 +333,196 @@ def test_the_web_app_is_served(client):
     assert "Conversation records" in response.text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/healthz").json() == {"status": "ok"}
+
+
+# -- direct upload and callbacks -------------------------------------------
+
+class _Bucket:
+    """Storage that takes bytes directly, the way S3 or R2 would."""
+
+    name = "s3"
+    supports_direct_upload = True
+
+    def __init__(self):
+        self.objects: dict[str, int] = {}
+
+    def upload_ticket(self, key, content_type):
+        from app.storage import UploadTicket
+
+        return UploadTicket(
+            key=key,
+            upload_url=f"https://bucket.example/{key}?sig=abc",
+            method="PUT",
+            headers={"Content-Type": content_type},
+        )
+
+    def put(self, key, stream, content_type):
+        self.objects[key] = len(stream.read())
+        return self.objects[key]
+
+    def exists(self, key):
+        return key in self.objects
+
+    def size(self, key):
+        return self.objects[key]
+
+    def delete(self, key):
+        self.objects.pop(key, None)
+
+    def playback_url(self, key, expires_in=3600):
+        return f"https://bucket.example/{key}?sig=abc"
+
+    def local_path(self, key):
+        return None
+
+
+@pytest.fixture
+def bucket(monkeypatch):
+    """Swap in remote storage everywhere the app reaches for it."""
+    from app import main as main_module
+
+    store = _Bucket()
+    monkeypatch.setattr(main_module, "get_storage", lambda *_: store)
+    monkeypatch.setattr("app.pipeline.get_storage", lambda *_: store)
+    return store
+
+
+def test_upload_ticket_hands_back_a_direct_url(client, bucket):
+    response = client.post(
+        "/api/uploads", data={"filename": "check-in.m4a", "content_type": "audio/mp4"}
+    )
+    assert response.status_code == 200
+    ticket = response.json()
+    assert ticket["direct"] is True
+    assert ticket["upload_url"].startswith("https://bucket.example/audio/")
+    assert ticket["key"].startswith("audio/") and ticket["key"].endswith(".m4a")
+    assert ticket["headers"]["Content-Type"] == "audio/mp4"
+
+
+def test_upload_ticket_rejects_a_non_audio_filename(client, bucket):
+    response = client.post("/api/uploads", data={"filename": "notes.txt"})
+    assert response.status_code == 400
+
+
+def test_local_storage_reports_no_direct_upload(client):
+    """The browser uses this to decide which upload path to take."""
+    body = client.get("/api/config").json()
+    assert body["storage_backend"] == "local"
+    assert body["direct_upload"] is False
+
+
+def test_completing_an_upload_creates_the_record(client, bucket, script, monkeypatch):
+    from app import pipeline
+
+    ticket = client.post("/api/uploads", data={"filename": "a.wav"}).json()
+    bucket.objects[ticket["key"]] = 4096  # the browser's PUT landed
+
+    class Stub:
+        name = "assemblyai"
+
+        def submit(self, audio_url, webhook_url, webhook_secret=""):
+            return "job-xyz"
+
+        def fetch(self, job_id):
+            from app.transcription.fixture import _script_to_transcript
+
+            return _script_to_transcript(script, 445.0)
+
+    monkeypatch.setattr(pipeline, "get_speech_provider", lambda *_: Stub())
+    monkeypatch.setattr(get_settings(), "job_runner", "deferred")
+    monkeypatch.setattr(get_settings(), "public_base_url", "https://records.example")
+
+    response = client.post(
+        "/api/conversations/complete",
+        json={
+            "key": ticket["key"],
+            "audio_filename": "a.wav",
+            "manager_name": "Priya",
+            "report_name": "Sam",
+            "consent_confirmed": True,
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "transcribing", "the request must not wait for transcription"
+    assert body["audio_filename"] == "a.wav"
+
+
+def test_completing_an_upload_still_requires_consent(client, bucket):
+    ticket = client.post("/api/uploads", data={"filename": "a.wav"}).json()
+    bucket.objects[ticket["key"]] = 10
+    response = client.post(
+        "/api/conversations/complete",
+        json={"key": ticket["key"], "audio_filename": "a.wav", "consent_confirmed": False},
+    )
+    assert response.status_code == 400
+
+
+def test_completing_an_upload_that_never_landed_is_a_conflict(client, bucket):
+    response = client.post(
+        "/api/conversations/complete",
+        json={"key": "audio/never.wav", "audio_filename": "never.wav", "consent_confirmed": True},
+    )
+    assert response.status_code == 409
+
+
+def test_a_forged_storage_key_is_rejected(client, bucket):
+    bucket.objects["secrets/keys.wav"] = 10
+    response = client.post(
+        "/api/conversations/complete",
+        json={"key": "secrets/keys.wav", "audio_filename": "keys.wav", "consent_confirmed": True},
+    )
+    assert response.status_code == 400
+
+
+def test_remote_audio_redirects_to_the_bucket(client, bucket, script):
+    """Never proxy a recording through a function billed by the second."""
+    detail = _upload(client, script).json()
+    with SessionLocal() as session:
+        conversation = session.get(Conversation, detail["id"])
+        conversation.audio_key = "audio/remote.wav"
+        session.commit()
+    bucket.objects["audio/remote.wav"] = 100
+
+    response = client.get(
+        f"/api/conversations/{detail['id']}/audio", follow_redirects=False
+    )
+    assert response.status_code == 307
+    assert response.headers["location"].startswith("https://bucket.example/audio/remote.wav")
+
+
+def test_the_webhook_needs_the_shared_secret(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "webhook_secret", "s3cret")
+    response = client.post(
+        "/api/webhooks/transcription", json={"transcript_id": "job-1", "status": "completed"}
+    )
+    assert response.status_code == 401
+
+
+def test_the_webhook_ignores_a_job_it_does_not_know(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "webhook_secret", "")
+    response = client.post(
+        "/api/webhooks/transcription", json={"transcript_id": "nope", "status": "completed"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "matched": False}
+
+
+def test_the_webhook_rejects_a_body_with_no_job_id(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "webhook_secret", "")
+    assert client.post("/api/webhooks/transcription", json={"status": "completed"}).status_code == 400
+
+
+def test_the_webhook_skips_intermediate_statuses(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "webhook_secret", "")
+    response = client.post(
+        "/api/webhooks/transcription", json={"transcript_id": "job-1", "status": "processing"}
+    )
+    assert response.json()["ignored"] == "processing"
+
+
+def test_resume_is_safe_on_a_finished_conversation(client, script):
+    detail = _upload(client, script).json()
+    response = client.post(f"/api/conversations/{detail['id']}/resume")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"

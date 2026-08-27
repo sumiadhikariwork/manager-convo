@@ -147,6 +147,49 @@ async function refreshConversations() {
 
 /* ---------------------------------------------------------------- upload */
 
+/* Two ways in. Where storage can take the bytes itself we hand them straight
+ * to it, because a serverless host caps what it will accept in a request body
+ * far below the size of a real recording. Otherwise the file comes through the
+ * application, which is simpler and fine for a self-hosted deployment. */
+
+async function uploadThroughServer(file, meta) {
+  const form = new FormData();
+  form.append('audio', file);
+  for (const [key, value] of Object.entries(meta)) form.append(key, String(value));
+  return api('/api/conversations', { method: 'POST', body: form });
+}
+
+async function uploadDirect(file, meta) {
+  const ticketForm = new FormData();
+  ticketForm.append('filename', file.name);
+  ticketForm.append('content_type', file.type || 'application/octet-stream');
+  const ticket = await api('/api/uploads', { method: 'POST', body: ticketForm });
+
+  if (!ticket.direct || !ticket.upload_url) return uploadThroughServer(file, meta);
+
+  const put = await fetch(ticket.upload_url, {
+    method: ticket.method || 'PUT',
+    headers: ticket.headers || {},
+    body: file,
+  });
+  if (!put.ok) {
+    throw new Error(
+      `Storage rejected the upload (${put.status}). If this is a CORS error, the bucket `
+      + 'needs to allow PUT from this origin.');
+  }
+
+  return api('/api/conversations/complete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ...meta,
+      key: ticket.key,
+      audio_filename: file.name,
+      audio_mime: file.type || '',
+    }),
+  });
+}
+
 function wireUpload() {
   const dropzone = $('#dropzone');
   const input = $('#audio-input');
@@ -183,19 +226,21 @@ function wireUpload() {
       return;
     }
 
-    const form = new FormData();
-    form.append('audio', file);
-    form.append('title', $('#title').value);
-    form.append('template_id', $('#template-id').value);
-    form.append('manager_name', $('#manager-name').value);
-    form.append('report_name', $('#report-name').value);
-    form.append('occurred_on', $('#occurred-on').value);
-    form.append('consent_confirmed', 'true');
+    const meta = {
+      title: $('#title').value,
+      template_id: $('#template-id').value,
+      manager_name: $('#manager-name').value,
+      report_name: $('#report-name').value,
+      occurred_on: $('#occurred-on').value,
+      consent_confirmed: true,
+    };
 
     $('#upload-btn').disabled = true;
     $('#upload-status').innerHTML = '<span class="spin"></span> Uploading…';
     try {
-      const created = await api('/api/conversations', { method: 'POST', body: form });
+      const created = state.config && state.config.direct_upload
+        ? await uploadDirect(file, meta)
+        : await uploadThroughServer(file, meta);
       $('#upload-status').textContent = '';
       $('#upload-form').reset();
       $('#drop-title').textContent = 'Drop an audio file here';
@@ -291,7 +336,7 @@ function renderBanner() {
   } else if (c.status !== 'ready') {
     banner.append(el('div', { class: 'notice info', style: 'margin-top:12px' },
       el('span', { class: 'spin' }), ' ',
-      `${STATUS_TEXT[c.status] || c.status}${c.status_detail ? ` — ${c.status_detail}` : ''}`));
+      c.status_detail || STATUS_TEXT[c.status] || c.status));
   } else if (c.metrics && c.metrics.degraded_reason) {
     banner.append(el('div', { class: 'notice warn', style: 'margin-top:12px' },
       `Drafted offline from verbatim excerpts — the Claude step was unavailable (${c.metrics.degraded_reason}). `
@@ -752,6 +797,7 @@ function renderConfigFooter() {
   $('#config-foot').replaceChildren(
     el('span', { text: `Speech to text: ${config.speech_provider} (${config.speech_model})` }),
     el('span', { text: `Alignment & drafting: ${config.analysis_provider} (${config.analysis_model})` }),
+    el('span', { text: `Storage: ${config.storage_backend}${config.direct_upload ? ' (direct upload)' : ''}` }),
     el('span', { text: `Upload limit: ${config.max_upload_mb} MB` }),
     el('span', { text: 'Quotes are resolved from the stored transcript, never generated.' }));
 }

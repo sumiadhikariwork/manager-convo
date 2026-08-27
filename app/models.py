@@ -78,6 +78,10 @@ class Conversation(Base):
     consent_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     audio_filename: Mapped[str] = mapped_column(String(400), default="")
+    #: Key in the configured storage backend. Authoritative.
+    audio_key: Mapped[str] = mapped_column(String(700), default="")
+    #: Path on this machine. Only the local backend sets it; the speech
+    #: providers that read a file rather than a URL need it.
     audio_path: Mapped[str] = mapped_column(String(700), default="")
     audio_mime: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
     audio_bytes: Mapped[int] = mapped_column(Integer, default=0)
@@ -91,6 +95,9 @@ class Conversation(Base):
 
     speech_provider: Mapped[str] = mapped_column(String(60), default="")
     speech_model: Mapped[str] = mapped_column(String(120), default="")
+    #: Job id at a hosted transcription service, when one is in use. The
+    #: webhook carries it back, and it is how a callback finds its record.
+    transcription_job_id: Mapped[str] = mapped_column(String(200), default="", index=True)
     analysis_provider: Mapped[str] = mapped_column(String(60), default="")
     analysis_model: Mapped[str] = mapped_column(String(120), default="")
     language: Mapped[str] = mapped_column(String(20), default="")
@@ -103,6 +110,9 @@ class Conversation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: When the current stage began. Lets a caller tell a slow stage from a
+    #: stalled one - the difference matters when nothing is watching.
+    stage_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     segments: Mapped[list["Segment"]] = relationship(
         back_populates="conversation",
@@ -123,6 +133,16 @@ class Conversation(Base):
     @property
     def is_terminal(self) -> bool:
         return self.status in (ProcessingStatus.READY, ProcessingStatus.FAILED)
+
+    @property
+    def stage_age_seconds(self) -> float | None:
+        """How long the current stage has been running."""
+        if self.stage_started_at is None:
+            return None
+        started = self.stage_started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return (utcnow() - started).total_seconds()
 
 
 class Segment(Base):

@@ -41,6 +41,7 @@ def main() -> int:
 
     # The fixture provider reads a sidecar rather than decoding audio.
     os.environ["SPEECH_PROVIDER"] = "fixture"
+    os.environ.setdefault("STORAGE_BACKEND", "local")
 
     from app.config import get_settings
     from app.db import init_db, session_scope
@@ -67,10 +68,12 @@ def main() -> int:
         session.flush()
         conversation_id = conversation.id
 
-        audio_path = settings.audio_dir / f"{conversation_id}.wav"
+        audio_key = f"audio/{conversation_id}.wav"
+        audio_path = settings.audio_dir / audio_key
         write_silent_wav(audio_path, DURATION_SECONDS)
         audio_path.with_suffix(".wav.txt").write_text(FIXTURE.read_text(encoding="utf-8"), encoding="utf-8")
 
+        conversation.audio_key = audio_key
         conversation.audio_path = str(audio_path)
         conversation.audio_bytes = audio_path.stat().st_size
         record_event(session, conversation_id, "uploaded", actor="Priya", filename="monthly_checkin.wav")

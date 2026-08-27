@@ -86,8 +86,33 @@ class TranscriptionError(RuntimeError):
 
 @runtime_checkable
 class SpeechProvider(Protocol):
-    """Anything that can turn an audio file into a timestamped transcript."""
+    """Anything that can turn an audio file into a timestamped transcript.
+
+    Synchronous: the caller waits. Fine for a long-lived server, impossible on
+    a host that kills the request after a minute.
+    """
 
     name: str
 
     def transcribe(self, audio_path: Path) -> Transcript: ...
+
+
+@runtime_checkable
+class AsyncSpeechProvider(Protocol):
+    """A transcription service that reads the audio itself and calls us back.
+
+    Two properties matter here. The service fetches the recording from its URL,
+    so the bytes never pass through this application; and it reports completion
+    by webhook, so nothing has to sit and wait. Together those are what let the
+    pipeline run where a request may only live for seconds.
+    """
+
+    name: str
+
+    def submit(self, audio_url: str, webhook_url: str, webhook_secret: str = "") -> str:
+        """Hand off the recording. Returns the provider's job id."""
+        ...
+
+    def fetch(self, job_id: str) -> Transcript:
+        """Collect a finished transcript."""
+        ...

@@ -104,6 +104,32 @@ class ConversationDetail(ConversationSummary):
     segments: list[SegmentOut] = Field(default_factory=list)
 
 
+class UploadTicketOut(BaseModel):
+    """What the browser needs in order to put a recording into storage."""
+
+    key: str
+    #: Absent when this deployment wants the file posted to it instead.
+    upload_url: str | None = None
+    method: str = "PUT"
+    headers: dict[str, str] = Field(default_factory=dict)
+    expires_in: int = 3600
+    direct: bool = False
+
+
+class CompleteUpload(BaseModel):
+    """Registers a recording the browser has already put into storage."""
+
+    key: str
+    audio_filename: str
+    title: str = ""
+    template_id: str = ""
+    manager_name: str = ""
+    report_name: str = ""
+    occurred_on: str = ""
+    consent_confirmed: bool = False
+    audio_mime: str = ""
+
+
 class FieldUpdate(BaseModel):
     value: Any = None
     edited_by: str = ""

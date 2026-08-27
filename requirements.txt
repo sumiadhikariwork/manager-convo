@@ -6,4 +6,11 @@ pydantic>=2.7
 pydantic-settings>=2.3
 anthropic>=1.0
 
-# Optional: local speech-to-text. Install with `pip install -r requirements-asr.txt`.
+# Object storage (STORAGE_BACKEND=s3) and Postgres (DATABASE_URL=postgresql://).
+# Both are unused by a plain local/SQLite run but cost ~30 MB and keep a single
+# requirements file, which is what the Vercel Python runtime installs from.
+boto3>=1.34
+psycopg[binary]>=3.1
+
+# Local speech-to-text is NOT here on purpose: faster-whisper plus a model is
+# far over a serverless bundle limit. Install requirements-asr.txt for it.

@@ -83,9 +83,14 @@ def silent_wav(tmp_path) -> Path:
 
 
 @pytest.fixture
-def audio_with_sidecar(settings, script, silent_wav) -> Path:
-    """A WAV in the app's audio directory with its fixture transcript beside it."""
-    target = settings.audio_dir / silent_wav.name
+def audio_with_sidecar(settings, script, silent_wav) -> str:
+    """A recording in local storage with its fixture transcript beside it.
+
+    Returns the storage key, which is what a Conversation now carries.
+    """
+    key = f"audio/{silent_wav.stem}.wav"
+    target = settings.audio_dir / key
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(silent_wav.read_bytes())
     target.with_suffix(".wav.txt").write_text(script, encoding="utf-8")
-    return target
+    return key
