@@ -1,0 +1,42 @@
+# Fixture transcript: monthly GROW coaching conversation.
+# Format: [mm:ss] Speaker: utterance
+# Used by the test suite and by scripts/seed_demo.py.
+
+[00:02] Priya: Sam, thanks for making time. Before we start on anything formal — how has the month been?
+[00:11] Sam: Honestly? Mixed. Busy is the word. The first two weeks were flat out with the migration, and then it went quiet in a way I did not expect.
+[00:26] Sam: I have been better than last month though. I am sleeping again, which helps.
+[00:34] Priya: That is good to hear. Anything outside work I should know about, or are we good?
+[00:41] Sam: No, we are good. Nothing dramatic.
+[00:47] Priya: Right. Let's pull up the Goal Charter and walk it together. What moved?
+[00:55] Sam: Two of the four moved. Onboarding time came down from nine days to six, which was the big one. And the support backlog is under fifty for the first time since March.
+[01:12] Priya: Six days is a real number. What do the numbers say about the other two?
+[01:19] Sam: The activation rate is basically flat. Twenty-two percent, was twenty-one. And the documentation goal I have not touched at all.
+[01:33] Priya: Flat on activation after a quarter of work is worth talking about. But before we do — I want to name something specific. The way you handled the migration weekend was excellent. You wrote the rollback plan before anyone asked for it, and when the second batch failed at two in the morning you used it instead of improvising. That is the thing I want more of.
+[01:59] Sam: Thanks. That one felt good actually.
+[02:05] Priya: It should. It is the difference between a bad night and a bad quarter. Now — activation. What is your read on why it is flat?
+[02:17] Sam: I think we measured the wrong thing. The goal says activation, but what we actually changed was onboarding speed, and those are not the same funnel step.
+[02:31] Priya: Say more about that.
+[02:35] Sam: Getting someone set up faster does not make them use the product. They still hit the same empty dashboard on day one. Faster just means they hit it sooner.
+[02:50] Priya: That is a fair point and I do not think you are wrong. Let's move into what is actually in the way. What has been blocking you?
+[03:01] Sam: The honest answer is that I am blocked on design. Every activation idea I have needs a change to the first-run screen, and design has been fully allocated to the billing work since January.
+[03:18] Sam: The second thing is that I do not have the analytics access to see where people drop off. I can see the top-line number and nothing underneath it.
+[03:32] Priya: How long have you been waiting on the analytics access?
+[03:37] Sam: Six weeks. I raised it twice in the platform channel and once directly with Marcus.
+[03:45] Priya: Six weeks is too long and that one is on me — I did not know it was still open. What have you already tried on the design side?
+[03:56] Sam: I tried mocking it up myself in Figma, which was a mistake — it took a day and it was not good enough to build from. I also tried scoping it small enough that a front-end engineer could just do it, but the change touches three components and Ana said no, reasonably.
+[04:19] Priya: And what would make it easier? If I could unblock exactly one thing this week, which one?
+[04:27] Sam: Analytics access. Without the drop-off data I am guessing at which screen even matters, and I would rather not spend design time on a guess.
+[04:41] Priya: That is a good answer. I would have said design and I think you are right that it is the wrong order.
+[04:50] Sam: The other thing that would help, honestly, is being told the documentation goal is dead. It has been on the charter for two quarters and it is never going to be the thing I pick up on a Tuesday.
+[05:06] Priya: I hear you. Let me think about that one rather than answer it in the room. I do not want to drop a goal just because it is unloved — but I also do not want it sitting there rotting.
+[05:22] Priya: Let's agree the way forward. On analytics, I will get you access. I am going to go to Marcus directly today and I will copy you so you can see it moving.
+[05:36] Sam: That would genuinely help.
+[05:40] Priya: Second — activation. I want you to write up the funnel argument you just made to me, the one about onboarding speed not being the same step as activation. One page, by the end of next week. Not a proposal, just the argument.
+[05:58] Sam: I can do that. End of next week is fine.
+[06:03] Priya: Third, on design: I will raise it at the planning session on Thursday and ask for a slice of design time in the next cycle. I am not promising you get it. I am promising I will ask and tell you the answer either way.
+[06:22] Sam: Understood. That is better than not knowing.
+[06:27] Priya: And I will come back to you on the documentation goal before we next meet. That is my decision to make, not yours to carry.
+[06:37] Sam: Thank you. That one has been quietly annoying me for a while.
+[06:43] Priya: Then let's say the same time next month, and if the analytics access is not through by Friday, message me and I will chase it again.
+[06:54] Sam: Will do.
+[06:57] Priya: Good conversation, Sam. The migration thing was genuinely well done.

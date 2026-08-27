@@ -1,0 +1,3 @@
+# Local transcription backend (CPU-friendly Whisper implementation).
+# Needed only when SPEECH_PROVIDER=faster_whisper.
+faster-whisper>=1.0

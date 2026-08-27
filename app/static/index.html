@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conversation records</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6bd8'/%3E%3Cpath d='M16 7a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0v-6a3 3 0 0 1 3-3z' fill='white'/%3E%3Cpath d='M10 15v1a6 6 0 0 0 12 0v-1' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3Cpath d='M16 22v3' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">Conversation records <span>· coaching &amp; feedback</span></div>
+  <div class="spacer"></div>
+  <button class="btn ghost" id="nav-home">All conversations</button>
+  <button class="btn primary" id="nav-new">Upload a recording</button>
+</header>
+
+<main class="wrap">
+  <!-- ============ upload + list ============ -->
+  <section id="view-home">
+    <div class="grid-2">
+      <div class="card" id="upload-card">
+        <div class="card-head">
+          <h2 style="font-size:17px">Upload a recording</h2>
+          <p style="margin:4px 0 0;color:var(--ink-3);font-size:13.5px">
+            The audio is transcribed, aligned to the agenda you were working from, and the
+            feedback form is filled in from what was actually said.
+          </p>
+        </div>
+        <div class="card-body">
+          <form id="upload-form" class="stack">
+            <div class="dropzone" id="dropzone">
+              <strong id="drop-title">Drop an audio file here</strong>
+              <div class="hint" id="drop-hint">or click to choose · wav, mp3, m4a, flac, ogg, webm</div>
+              <input type="file" id="audio-input" accept="audio/*,.m4a,.opus,.webm" class="hidden">
+            </div>
+
+            <div class="field-row">
+              <div>
+                <label class="lbl" for="manager-name">Manager</label>
+                <input type="text" id="manager-name" placeholder="Priya Raman" autocomplete="off">
+              </div>
+              <div>
+                <label class="lbl" for="report-name">Person coached</label>
+                <input type="text" id="report-name" placeholder="Sam Okafor" autocomplete="off">
+              </div>
+            </div>
+
+            <div class="field-row">
+              <div>
+                <label class="lbl" for="template-id">Conversation template</label>
+                <select id="template-id"></select>
+              </div>
+              <div>
+                <label class="lbl" for="occurred-on">Date of conversation</label>
+                <input type="date" id="occurred-on">
+              </div>
+            </div>
+
+            <div>
+              <label class="lbl" for="title">Title <span style="font-weight:400;color:var(--ink-3)">(optional)</span></label>
+              <input type="text" id="title" placeholder="Monthly check-in">
+            </div>
+
+            <label class="consent">
+              <input type="checkbox" id="consent">
+              <span>Both people knew this conversation was being recorded, and the person coached
+              will be able to read the record it produces.</span>
+            </label>
+
+            <div id="upload-error" class="notice err hidden"></div>
+
+            <div style="display:flex;gap:10px;align-items:center">
+              <button type="submit" class="btn primary" id="upload-btn">Upload and process</button>
+              <span id="upload-status" style="font-size:13px;color:var(--ink-3)"></span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="card-head"><h2 style="font-size:17px">Recent conversations</h2></div>
+          <div class="conv-list" id="conv-list">
+            <div class="empty">Nothing here yet.</div>
+          </div>
+        </div>
+        <div class="card" id="template-preview"></div>
+      </div>
+    </div>
+    <div class="foot" id="config-foot"></div>
+  </section>
+
+  <!-- ============ review ============ -->
+  <section id="view-review" class="hidden">
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-body">
+        <div class="record-head">
+          <div class="grow">
+            <h2 id="r-title">…</h2>
+            <div class="sub" id="r-sub"></div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" id="btn-export-md">Export Markdown</button>
+            <button class="btn" id="btn-export-json">Export JSON</button>
+            <button class="btn" id="btn-reprocess">Re-run</button>
+            <button class="btn danger" id="btn-delete">Delete</button>
+          </div>
+        </div>
+        <div id="r-banner"></div>
+        <div class="stats" id="r-stats"></div>
+      </div>
+    </div>
+
+    <div class="review">
+      <div>
+        <div class="card">
+          <div class="card-head" style="display:flex;align-items:center;gap:10px">
+            <h2 style="font-size:16px">Feedback record</h2>
+            <span class="pill" id="r-source-pill"></span>
+            <span style="margin-left:auto;font-size:12.5px;color:var(--ink-3)" id="r-save-state"></span>
+          </div>
+          <div id="form-sections"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2 style="font-size:16px">Audit trail</h2></div>
+          <div class="audit" id="audit-list"></div>
+        </div>
+      </div>
+
+      <div class="rail">
+        <div class="card">
+          <div class="player">
+            <audio id="player" controls preload="metadata"></audio>
+          </div>
+          <div class="tabs">
+            <button class="tab on" data-tab="transcript">Transcript</button>
+            <button class="tab" data-tab="timing">Timing</button>
+          </div>
+          <div class="transcript" id="transcript"></div>
+          <div class="transcript hidden" id="timing" style="padding:16px"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

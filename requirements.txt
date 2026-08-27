@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+SQLAlchemy>=2.0
+pydantic>=2.7
+pydantic-settings>=2.3
+anthropic>=1.0
+
+# Optional: local speech-to-text. Install with `pip install -r requirements-asr.txt`.
