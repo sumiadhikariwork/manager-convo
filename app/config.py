@@ -36,8 +36,22 @@ class Settings(BaseSettings):
         return self.max_upload_mb * 1024 * 1024
 
     def ensure_dirs(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.audio_dir.mkdir(parents=True, exist_ok=True)
+        """Create the storage directories, with a legible error if we cannot.
+
+        Called explicitly at startup rather than at import, so that merely
+        importing the app on a read-only filesystem does not kill the process
+        before it can report anything.
+        """
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.audio_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot write to DATA_DIR ({self.data_dir}): {exc}. "
+                "This app stores recordings and its database on disk, so it needs a "
+                "writable, persistent directory. On a read-only or ephemeral host, "
+                "point DATA_DIR at a mounted volume."
+            ) from exc
 
     def claude_available(self) -> bool:
         """True when a Claude-backed analysis run is actually possible.
@@ -52,6 +66,9 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    settings = Settings()
-    settings.ensure_dirs()
-    return settings
+    """Read configuration. Deliberately free of side effects.
+
+    Directory creation happens in ensure_dirs(), called from the application's
+    startup hook - reading configuration must never touch the filesystem.
+    """
+    return Settings()

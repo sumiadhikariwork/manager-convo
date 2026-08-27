@@ -201,7 +201,54 @@ app/
   main.py              HTTP API and the web app
   static/              single-page review UI, no build step
 scripts/seed_demo.py   loads the worked example
+Dockerfile             container image, for any host with a persistent volume
 ```
+
+---
+
+## Deploying
+
+This is a stateful service, not a set of functions. It needs three things from
+its host: a **writable, persistent disk** (recordings and the SQLite database),
+a **process that keeps running between requests** (transcription happens in the
+background after the upload responds), and **no hard cap on request size or
+duration** (a fifteen-minute recording is tens of megabytes and takes minutes to
+transcribe).
+
+Any container host with a volume satisfies that. A `Dockerfile` and a
+`docker-compose.yml` are included:
+
+```bash
+docker compose up --build          # http://localhost:8000
+```
+
+The compose file mounts a named volume at `/data`; recordings and the database
+survive restarts because of it. Deploying to Render, Railway, Fly.io, a VM, or
+your own Kubernetes is the same image — point `DATA_DIR` at the mounted volume
+and set `ANTHROPIC_API_KEY`. Most managed hosts inject `$PORT`, which the
+container's start command honours.
+
+The first transcription downloads the Whisper model (a few hundred MB for
+`small`) into `/data/models`, so give the volume room and expect the first run
+after a fresh deploy to be slow.
+
+### Why not Vercel, Netlify Functions, or Lambda
+
+Serverless platforms are a poor fit for this app, and it is worth knowing why
+before trying:
+
+| What the app does | What serverless gives it |
+|---|---|
+| Writes recordings to disk | Read-only filesystem apart from `/tmp`, which is per-instance and wiped |
+| Keeps state in SQLite | Same — two requests can land on two instances with two different databases |
+| Transcribes in a background thread after responding | The instance is frozen the moment the response is sent; the thread never finishes |
+| Runs Whisper locally | Model and dependencies are far over the bundle size limit |
+| Accepts a multi-megabyte upload | Request bodies are capped (4.5 MB on Vercel) |
+
+Making it work there means swapping every one of those out: managed Postgres,
+object storage with direct-to-bucket uploads, a hosted transcription API, and a
+queue with a worker. That is a viable architecture, but it is a different one —
+and it ends the property that the audio never leaves your own infrastructure.
 
 ---
 

@@ -34,6 +34,7 @@ DEMO_DURATION = 445.0
 
 @pytest.fixture(scope="session", autouse=True)
 def _database():
+    get_settings().ensure_dirs()
     init_db()
     yield
     Base.metadata.drop_all(engine)

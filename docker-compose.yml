@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Recordings and the database survive `docker compose down` because of this.
+      - conversation-data:/data
+    environment:
+      SPEECH_PROVIDER: faster_whisper
+      WHISPER_MODEL: small
+      ANALYSIS_PROVIDER: claude
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  conversation-data:
